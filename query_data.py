@@ -1,11 +1,12 @@
 import argparse
 import os
 
-from langchain_community.vectorstores import Chroma
-from langchain.prompts import ChatPromptTemplate
+from scrt import CHROMADB_HOST, CHROMADB_PORT
+import chromadb
+from embedding_function import openai_ef
 
-import basic_gpt
-from embedding_function import get_embedding_function
+import llm_api_wrapper
+
 import util
 
 
@@ -24,9 +25,6 @@ GREEN = "\033[32m"
 RESET = "\033[0m"
 
 
-
-
-
 def main():
     # Create CLI.
     parser = argparse.ArgumentParser()
@@ -40,36 +38,48 @@ def main():
     if args.debug:
         print(f"{ORANGE}⭕  DEBUG Mode Active{RESET}")
 
-    selected_topic = args.topic if args.topic else default_topic
-    topic_config = data_topics[selected_topic]
-    topic_dir = topic_config['topic_dir']
-    chroma_dir = f"{topic_dir}/chroma"
-    # data_dir = f"{topic_dir}/documents"
+    if not args.query_text:
+        query_text = "What is the capital of France?"
+        print(f"{WHITE}🔍  Using default Test query: {query_text}{RESET}")
+    else:
+        query_text = args.query_text
 
-    query_text = args.query_text
-    response_text, _, _ = query_rag(query_text, chroma_dir, debug=args.debug)
+    if not args.topic:
+        topic = default_topic
+        if default_topic == "all":
+            topic = list(data_topics.keys())[0]
+        print(f"{WHITE}📄  Using default Test topic: {topic}{RESET}")
+    else:
+        topic = args.topic
+
+    response_text, _, _ = query_rag(query_text, topic, debug=args.debug)
 
     print(f"{WHITE}{response_text}{RESET}")
     print()
 
 
-def query_rag(query_text: str, chroma_dir: str, unique_role: str=None, unique_prompt_template: str=None,
-              debug: bool = False):
+def query_rag(query_text: str, topic: str, unique_role: str=None, unique_prompt_template: str=None,
+              debug: bool = False, n_results: int = 2):
     # Prepare the DB.
-    embedding_function = get_embedding_function()
-    db = Chroma(persist_directory=chroma_dir, embedding_function=embedding_function)
+    chroma_client = chromadb.HttpClient(host=CHROMADB_HOST, port=CHROMADB_PORT)
+
+    # Create or get the test collection
+    collection = chroma_client.get_or_create_collection(name=topic, embedding_function=openai_ef)
 
     # Search the DB.
-    results = db.similarity_search_with_score(query_text, k=4)
+    results = collection.query(
+    query_texts=[query_text],  # Chroma will embed this for you
+    n_results=n_results  # how many results to return
+    )
 
+    ids = results['ids'][0]
+    page_contents = results['documents'][0]
+    metadatas = results['metadatas'][0]
     context_texts = []
-    metadata_list = []
-    for doc, _score in results:
-        metadata_list.append(doc.metadata)
-        pdf_name = doc.metadata.get("pdf_name", None)
-        title = doc.metadata.get("title", None)
-        # doc_name = doc.metadata.get("doc_name", None)
-        page_content = doc.page_content
+    for i in range(len(ids)):
+        pdf_name = metadatas[i].get("pdf_name", None)
+        title = metadatas[i].get("title", None)
+        page_content = page_contents[i]
         # if type == "image":
         context_texts.append(f"[source: {pdf_name}, {title}]\n{page_content}")
 
@@ -79,18 +89,17 @@ def query_rag(query_text: str, chroma_dir: str, unique_role: str=None, unique_pr
         print("Prompt:\n", query_text)
         # print("Retrieved Summarize:\n", results)
         print("Context:\n", context_text)
-        print("Metadata:\n", metadata_list)
+        print("Metadata:\n", metadatas)
         print("\n")
 
-    prompt_template = ChatPromptTemplate.from_template(
-        PROMPT_TEMPLATE if not unique_prompt_template else unique_prompt_template)
+    prompt_template = PROMPT_TEMPLATE if not unique_prompt_template else unique_prompt_template
 
     prompt = prompt_template.format(context=context_text, question=query_text)
 
     role = "Provide accurate and concise answers based solely on the given context." if not unique_role else unique_role
-    response_text = basic_gpt.ask_mini_gpt(prompt, role)
+    response_text = llm_api_wrapper.basic_prompt(prompt, role=role, temperature= 0.2, model="default")
 
-    return response_text, context_text, metadata_list
+    return response_text, context_text, metadatas
 
 
 def load_raw_document_content(doc_name: str, data_dir: str):

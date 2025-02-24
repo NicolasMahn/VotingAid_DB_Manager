@@ -1,51 +1,22 @@
 import os
 import json
 import PyPDF2
+import re
+
+from pygments.lexer import default
+
+from llm_api_wrapper import basic_prompt
+from util import extract_code_from_markdown
+
+WHITE = "\033[97m"
+BLUE = "\033[34m"
+GREEN = "\033[32m"
+ORANGE = "\033[38;5;208m"
+PINK = "\033[38;5;205m"
+RESET = "\033[0m"
 
 
-def find_pages_for_paragraphs(pdf_path, paragraphs, start_page=1):
-    """
-    Finds pages for multiple paragraphs in a PDF, starting from a given page.
-
-    Args:
-        pdf_path (str): Path to the PDF file.
-        paragraphs (list of dict): A list of dictionaries with 'heading' and 'content'.
-        start_page (int): The page number to start searching from (1-based index).
-
-    Returns:
-        list of dict: A list of dictionaries with 'heading', 'content', and 'page'.
-    """
-    results = []
-    try:
-        with open(pdf_path, 'rb') as file:
-            reader = PyPDF2.PdfReader(file)
-            num_pages = len(reader.pages)
-
-            for paragraph in paragraphs:
-                heading = paragraph["heading"]
-                content = paragraph["content"]
-                found_page = -1
-
-                # Search for the page of the heading, starting from the specified page
-                for page_number in range(start_page - 1, num_pages):
-                    text = reader.pages[page_number].extract_text()
-                    if heading in text:
-                        found_page = page_number + 1  # Convert 0-based index to 1-based
-                        break
-
-                # Store result
-                results.append({
-                    "heading": heading,
-                    "content": content,
-                    "page": found_page
-                })
-    except Exception as e:
-        print(f"Error reading the PDF: {e}")
-
-    return results
-
-
-def save_results(output_dir, pdf_name, results):
+def save_data(output_dir, pdf_name, results):
     """
     Saves the extracted sections as text files and updates the JSON configuration file.
 
@@ -54,38 +25,24 @@ def save_results(output_dir, pdf_name, results):
         pdf_name (str): Original PDF file name.
         results (list of dict): List of results with 'heading', 'content', and 'page'.
     """
-    documents_dir = os.path.join(output_dir, "documents")
-    config_path = os.path.join(output_dir, "data_config.json")
-
-    # Ensure the output directory exists
-    os.makedirs(documents_dir, exist_ok=True)
-
-    # Load or initialize the configuration file
-    if os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
-    else:
-        config = []
+    config_path = os.path.join(output_dir, "data.json")
+    config = []
 
     # Process each result
     for result in results:
-        heading = result["heading"]
-        content = result["content"]
-        page = result["page"]
-        txt_filename = f"{heading.replace(' ', '_').replace(':', '').replace('/', '')}.txt"
-        txt_path = os.path.join(documents_dir, txt_filename)
+        heading = result["title"]
+        content = result.get("content", None)
+        page = result.get("page", None)
 
-        # Save the content as a text file
-        with open(txt_path, "w", encoding="utf-8") as f:
-            f.write(content)
 
         # Add entry to the configuration
         config_entry = {
             "pdf_name": pdf_name,
-            "txt_file": txt_filename,
             "page": page,
             "title": heading
         }
+        if content:
+            config_entry["content"] = content
         config.append(config_entry)
 
     # Save the updated configuration file
@@ -93,17 +50,21 @@ def save_results(output_dir, pdf_name, results):
         json.dump(config, f, indent=4, ensure_ascii=False)
 
 
-def multiline_input(prompt):
+def get_saved_config(output_dir):
+    config_path = os.path.join(output_dir, "data.json")
+    if os.path.exists(config_path):
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        return config
+    return None
+
+
+def multiline_input():
     """
     Reads multiline input until the user types 'END'.
-
-    Args:
-        prompt (str): The prompt message for the input.
-
     Returns:
         str: The complete multiline input.
     """
-    print(prompt)
     lines = []
     while True:
         line = input()
@@ -113,49 +74,222 @@ def multiline_input(prompt):
     return "\n".join(lines)
 
 
+def is_doubled_section(s):
+    """Check if the entire section is doubled (all characters appear in pairs)."""
+    if len(s) % 2 != 0:
+        return False
+    for i in range(0, len(s), 2):
+        if s[i] != s[i + 1]:
+            return False
+    return True
+
+
+def remove_doubled_characters_section(s):
+    """Remove doubled characters from a section where all characters are doubled."""
+    # Split the text into sections based on double line breaks
+    sections = s.split(" ")
+    cleaned_sections = []
+    for section in sections:
+        if is_doubled_section(section.replace(" ", "").replace("\n", "")):
+            # Remove doubles in this section
+            cleaned_section = ''.join([section[i] for i in range(0, len(section), 2)])
+            cleaned_sections.append(cleaned_section)
+        else:
+            # Keep section as is
+            cleaned_sections.append(section)
+    cleaned_text = " ".join(cleaned_sections)
+    # Remove double spaces
+    cleaned_text = re.sub(r' {2,}', ' ', cleaned_text)
+    return cleaned_text
+
+
+def get_text_from_pdf(pdf_path, start_page, end_page=None):
+    """
+    Extracts text from a range of pages in a PDF file.
+
+    Args:
+        pdf_path (str): Path to the PDF file.
+        start_page (int): The first page to extract text from (1-based index).
+        end_page (int): The last page to extract text from (1-based index).
+
+    Returns:
+        str: The extracted text.
+    """
+    text = ""
+    try:
+        with open(pdf_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            num_pages = len(reader.pages)
+
+            if end_page is None:
+                end_page = num_pages
+
+            if start_page < 1 or end_page > num_pages:
+                print(f"Invalid page range. The PDF has {num_pages} pages.")
+                return text
+
+            for page_number in range(start_page - 1, end_page):
+                text += reader.pages[page_number].extract_text()
+
+    except Exception as e:
+        print(f"Error reading the PDF: {e}")
+
+    return text
+
+
+def get_content_list_from_pdf(content_txt):
+    """
+    Extracts the content list from the extracted text of the PDF.
+
+    Args:
+        content_txt (str): The extracted text containing the content list.
+
+    Returns:
+        list of dict: A list of dictionaries with 'title' and 'page'.
+    """
+    prompt = f"Extract the content list from the text: \n```\n{content_txt}\n```"
+    role = """Your job is to extract the content list from the text.
+Please use the following format:
+```
+[
+    {"title": "Überüberschrift", "page": 10, "hierarchy": 1},
+    {"title": "Unterüberschrift", "page": 10, "hierarchy": 2}
+]
+```
+Incase you are unsure about the page numbers or hierarchy, you may remove these two keys from the dictionary."""
+    response_txt = basic_prompt(prompt, role, temperature=0.1, model="gpt-4o-mini")
+    content_list_str = extract_code_from_markdown(response_txt)[0]
+    content_list = json.loads(content_list_str)
+
+    return content_list
+
+
+def remove_default(content_txt, output_dir):
+    default_remove_lines = None
+    if os.path.exists(os.path.join(output_dir, "default_remove.json")):
+        with open(os.path.join(output_dir, "default_remove.json"), "r", encoding="utf-8") as f:
+            default_remove_lines = json.load(f)
+    if default_remove_lines:
+        for line in default_remove_lines:
+            content_txt = re.sub(line, '', content_txt, flags=re.MULTILINE)
+            # removing unnecessary break lines
+            content_txt = content_txt.replace("\n\n", "\n")
+
+    return content_txt
+
+
 def main():
     # Input paths
-    pdf_path = input("Enter the path to the PDF file: ").strip()
-    output_dir = input("Enter the output directory: ").strip()
+    pdf_path = input(f"{BLUE}Enter the path to the PDF file: {RESET}").strip()
+    if pdf_path == "":
+        pdf_path = "data/union/km_btw_2025_wahlprogramm_langfassung_ansicht.pdf"
 
-    # Specify start page for searching
-    start_page = int(input("Enter the starting page for search (1-based index): ").strip())
+    output_dir = input(f"{BLUE}Enter the output directory: {RESET}").strip()
+    if output_dir == "":
+        output_dir = "data/union"
 
-    # Input paragraphs
-    paragraphs = []
-    print("Enter the headings and content. Type 'STOP' to finish or 'BACK' to reenter the last entry.")
-    last_entry = None
+    back_flag = False
+
+    content_list = get_saved_config(output_dir)
+    if not content_list:
+
+        # Specify start page of content
+        start_page_content = int(input(f"{BLUE}If the document has no content pages, enter 0. "
+                                       "Otherwise, enter the first page of the content (Inhaltsverzeichnis) "
+                                       f"(1-based index): {RESET}").strip())
+        if start_page_content == 0:
+            print(f"{BLUE}Please input all headings, ideally with the page number in the same line. "
+                  f"Don't worry about formatting. Type {WHITE}END{BLUE} when your done.\n{RESET}")
+            content_txt = multiline_input()
+        else:
+            end_page_content = int(input(f"{BLUE}Enter the last page of the content (Inhaltsverzeichnis) "
+                                         f"(1-based index): {RESET}").strip())
+            content_txt = get_text_from_pdf(pdf_path, start_page_content, end_page_content)
+        print(f"{BLUE}The text is being processed...{RESET}\n")
+
+        content_list = get_content_list_from_pdf(content_txt)
+        page_offset = int(input(f"{BLUE}Is there a unaccounted title page(s)? {RESET}").strip().lower())
+        if page_offset > 0:
+            for i in range(len(content_list)):
+                content_list[i]["page"] += page_offset
+
+        save_data(output_dir, os.path.basename(pdf_path), content_list)
+
+    i = 0
     while True:
-        heading = input("Enter heading (or 'STOP' to finish, 'BACK' to reenter): ").strip()
-        if heading.lower() == "stop":
+        if i >= len(content_list):
             break
-        if heading.lower() == "back":
-            if last_entry:
-                print("Reentering the last entry:")
-                print(f"Previous heading: {last_entry['heading']}")
-                print(f"Previous content:\n{last_entry['content']}")
-                heading = input("Enter new heading (or press Enter to keep the same): ").strip()
-                if heading == "":
-                    heading = last_entry["heading"]
-                content = multiline_input("Enter new content (or type 'END' to finish): ")
-                if content.strip() == "":
-                    content = last_entry["content"]
-                paragraphs[-1] = {"heading": heading, "content": content}
-            else:
-                print("No previous entry to reenter.")
+        current_content = content_list[i]
+        if current_content.get("content", None) and not back_flag:
+            i += 1
+            continue
+        if back_flag:
+            back_flag = False
+        next_content = content_list[i+1] if i+1 < len(content_list) else None
+        content_txt = get_text_from_pdf(pdf_path, current_content["page"],
+                                        next_content["page"] if next_content else None)
+
+        content_txt = remove_default(content_txt, output_dir)
+        content_txt = remove_doubled_characters_section(content_txt)
+
+        search_by_cc_title = current_content.get("search_by_title", current_content["title"])
+        content_txt = content_txt[content_txt.find(search_by_cc_title):]
+
+        if next_content:
+            search_by_nc_title = next_content.get("search_by_title", next_content["title"])
+            content_txt = content_txt[:content_txt.find(search_by_nc_title)]
+
+
+
+        print(f"{BLUE}The text behind the title {WHITE}'{current_content['title']}'{BLUE} "
+              f"(starting from page {WHITE}{current_content['page']}{BLUE}) is:"
+              f"{WHITE}\n\n{content_txt}\n\n{BLUE}")
+        print(f"The next title is {WHITE}'{next_content['title']}'{BLUE}. \n" if next_content else "")
+
+        next_step = input(f"Is this section accurate? \nDo you want to EDIT this section "
+                          f"(or edit the (next) TITLE), REMOVE this section, BACK"
+                          f" or CONTINUE? {PINK}(t/nt/e/r/b/C){BLUE}: {RESET}").strip().lower()
+        if next_step == "b":
+            back_flag = True
+            i -= 1
+            continue
+        if next_step == "t":
+            new_title = input(f"{BLUE}Please input the new title: {RESET}")
+            current_content["search_by_title"] = new_title
+            continue
+        elif next_step == "nt":
+            new_title = input(f"{BLUE}Please input the new (next) title: {RESET}")
+            next_content["search_by_title"] = new_title
+            continue
+        if next_step == "e":
+            original_content = content_txt
+            while True:
+                remove_line = input(f"{BLUE}Input the characters you would like to remove, \n"
+                                    f"{PINK}STOP{BLUE}, if everything is now satisfactory, "
+                                    f"{PINK}PRINT{BLUE}, to reprint the section, or "
+                                    f"{PINK}UNDO{BLUE}, to undo all edits: {RESET}")
+                if remove_line.upper() == "STOP" or remove_line == "":
+                    break
+                elif remove_line.upper() == "PRINT":
+                    print(f"{WHITE}{content_txt}{RESET}")
+                elif remove_line.upper() == "UNDO":
+                    content_txt = original_content
+                else:
+                    content_txt = content_txt.replace(remove_line, "")
+                    # removing unnecessary break lines
+                    content_txt = content_txt.replace("\n\n", "\n")
+
+        elif next_step == "r":
+            content_list.remove(current_content)
             continue
 
-        content = multiline_input("Enter content (type 'END' to finish): ")
-        last_entry = {"heading": heading, "content": content}
-        paragraphs.append(last_entry)
+        current_content["content"] = content_txt
+        save_data(output_dir, os.path.basename(pdf_path), content_list)
 
-    # Find pages for paragraphs starting from the specified page
-    pdf_name = os.path.basename(pdf_path)
-    results = find_pages_for_paragraphs(pdf_path, paragraphs, start_page)
+        i += 1
+        print("\n\n")
 
-    # Save results
-    save_results(output_dir, pdf_name, results)
-    print("Results saved successfully.")
+    print(f"{PINK}All sections have been extracted and saved.{RESET}")
 
 
 if __name__ == "__main__":
