@@ -1,0 +1,45 @@
+data_topics:
+  afd:
+    topic_dir: "data/afd"
+    allowed_domains: [ ]
+    start_urls: [ ]
+    non_content_phrases: [ ]
+    black_listed_imgs: [ ]
+  bsw:
+    topic_dir: "data/bsw"
+    allowed_domains: [ ]
+    start_urls: [ ]
+    non_content_phrases: [ ]
+    black_listed_imgs: [ ]
+  fdp:
+    topic_dir: "data/fdp"
+    allowed_domains: [ ]
+    start_urls: [ ]
+    non_content_phrases: [ ]
+    black_listed_imgs: [ ]
+  gruene:
+    topic_dir: "data/gruene"
+    allowed_domains: [ ]
+    start_urls: [ ]
+    non_content_phrases: [ ]
+    black_listed_imgs: [ ]
+  linke:
+    topic_dir: "data/linke"
+    allowed_domains: [ ]
+    start_urls: [ ]
+    non_content_phrases: [ ]
+    black_listed_imgs: [ ]
+  spd:
+    topic_dir: "data/spd"
+    allowed_domains: [ ]
+    start_urls: [ ]
+    non_content_phrases: [ ]
+    black_listed_imgs: [ ]
+  union:
+    topic_dir: "data/union"
+    allowed_domains: []
+    start_urls: []
+    non_content_phrases: []
+    black_listed_imgs: []
+
+default_topic: "union"
